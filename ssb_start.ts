@@ -26,17 +26,31 @@ import {
   VersionedTransaction,
   Commitment,
 } from '@solana/web3.js';
-import { retry, getTokenAccounts, RAYDIUM_LIQUIDITY_PROGRAM_ID_V4, OPENBOOK_PROGRAM_ID, createPoolKeys, retrieveEnvVariable, retrieveTokenValueByAddress } from './core/tokens';
+import {
+  retry,
+  getTokenAccounts,
+  RAYDIUM_LIQUIDITY_PROGRAM_ID_V4,
+  OPENBOOK_PROGRAM_ID,
+  createPoolKeys,
+  retrieveEnvVariable,
+  retrieveTokenValueByAddress,
+  addToken,
+} from './core/tokens';
 import { getMinimalMarketV3, MinimalMarketLayoutV3, getRugCheck } from './core/tokens';
 import { MintLayout } from './core/mint';
 import bs58 from 'bs58';
 import * as fs from 'fs';
-import * as path from 'path'; 
+import * as path from 'path';
 import { logger } from './core/logger';
-
+import connectDB from './config/db';
 const network = 'mainnet-beta';
 const RPC_ENDPOINT = retrieveEnvVariable('RPC_ENDPOINT', logger);
 const RPC_WEBSOCKET = retrieveEnvVariable('RPC_WEBSOCKET', logger);
+
+const filePath = 'output.json';
+
+// Connect Databse
+connectDB();
 
 const solanaConnection = new Connection(RPC_ENDPOINT, {
   wsEndpoint: RPC_WEBSOCKET,
@@ -75,7 +89,6 @@ const MAX_POOL_SIZE = retrieveEnvVariable('MAX_POOL_SIZE', logger);
 let snipeList: string[] = [];
 
 async function init(): Promise<void> {
-
   logger.info(`
 
                                     EARLY ACCESS - USE AT YOUR OWN RISK
@@ -135,6 +148,8 @@ async function init(): Promise<void> {
   logger.info(`Auto sell: ${AUTO_SELL}`);
   logger.info(`T/P: ${TAKE_PROFIT}%`);
   logger.info(`S/L: ${STOP_LOSS}%`);
+
+  console.log(quoteMinPoolSizeAmount);
   logger.info(
     `Pool size min >: ${quoteMinPoolSizeAmount.isZero() ? 'false' : quoteMinPoolSizeAmount.toFixed()} ${quoteToken.symbol}`,
   );
@@ -154,12 +169,12 @@ async function init(): Promise<void> {
 
   const tokenAccount = tokenAccounts.find((acc) => acc.accountInfo.mint.toString() === quoteToken.mint.toString())!;
 
-  if (!tokenAccount) {
-    logger.error(`---> Put SOL in your wallet and swap SOL to WSOL at https://jup.ag/ <---`);
-    throw new Error(`No ${quoteToken.symbol} token account found in wallet: ${wallet.publicKey}`);
-  }
+  // if (!tokenAccount) {
+  //   logger.error(`---> Put SOL in your wallet and swap SOL to WSOL at https://jup.ag/ <---`);
+  //   throw new Error(`No ${quoteToken.symbol} token account found in wallet: ${wallet.publicKey}`);
+  // }
 
-  quoteTokenAssociatedAddress = tokenAccount.pubkey;
+  // quoteTokenAssociatedAddress = tokenAccount.pubkey;
 
   loadSnipedList();
 }
@@ -180,30 +195,29 @@ function saveTokenAccount(mint: PublicKey, accountData: MinimalMarketLayoutV3) {
 }
 
 export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStateV4) {
-
   let rugRiskDanger = false;
-  let rugRisk = 'Unknown';
+  let tokenprice: number | null = 0;
 
   if (!shouldBuy(poolState.baseMint.toString())) {
     return;
   }
-
+  const poolTokenAddress = poolState.baseMint.toString();
   if (!quoteMinPoolSizeAmount.isZero()) {
     const poolSize = new TokenAmount(quoteToken, poolState.swapQuoteInAmount, true);
-    const poolTokenAddress = poolState.baseMint.toString();
 
     // rug check
-    // await getRugCheck(poolState.baseMint.toString()).then((risk) => {
-    //   if (risk === 'Danger') {
-    //     rugRiskDanger = true;
-    //   }
-    //   rugRisk = risk;
-    // } );
+    let { isDanger, price } = await getRugCheck(poolTokenAddress);
+    const rugRisk = isDanger;
+    tokenprice = price;
 
-    if (poolSize.lt(quoteMinPoolSizeAmount) || rugRiskDanger) {
-      logger.warn(`------------------- POOL SKIPPED | (${poolSize.toFixed()} ${quoteToken.symbol}) ------------------- `);
+    if (poolSize.lt(quoteMinPoolSizeAmount) || rugRisk) {
+      logger.warn(
+        `------------------- POOL SKIPPED | (${poolSize.toFixed()} ${quoteToken.symbol}) ------------------- `,
+      );
     } else {
-      logger.info(`--------------!!!!! POOL SNIPED | (${poolSize.toFixed()} ${quoteToken.symbol}) !!!!!-------------- `);
+      logger.info(
+        `--------------!!!!! POOL SNIPED | (${poolSize.toFixed()} ${quoteToken.symbol}) !!!!!-------------- `,
+      );
     }
     // logger.info(`TOKEN rugcheck.xyz: ${rugRisk}`);
     logger.info(`Pool link: https://dexscreener.com/solana/${id.toString()}`);
@@ -250,9 +264,16 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
   if (ENABLE_BUY) {
     await buy(id, poolState);
   } else {
+    console.log('id=');
+    console.log(id);
+    console.log('poolState=');
+    console.log(poolState);
+    console.log('tokenPrice=');
+    console.log(tokenprice);
+    writeObjectToFile(poolState, filePath);
+    await addToken(poolTokenAddress, tokenprice);
     logger.info(`--------------- TOKEN BUY ---------------- \n`);
   }
-
 }
 
 export async function checkMintable(vault: PublicKey): Promise<boolean | undefined> {
@@ -331,12 +352,12 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
     transaction.sign([wallet, ...innerTransaction.signers]);
     const rawTransaction = transaction.serialize();
     const signature = await retry(
-    () =>
-      solanaConnection.sendRawTransaction(rawTransaction, {
-        skipPreflight: true,
-      }),
-    { retryIntervalMs: 10, retries: 50 },
-  );
+      () =>
+        solanaConnection.sendRawTransaction(rawTransaction, {
+          skipPreflight: true,
+        }),
+      { retryIntervalMs: 10, retries: 50 },
+    );
     logger.info({ mint: accountData.baseMint, signature }, `Sent buy tx`);
     const confirmation = await solanaConnection.confirmTransaction(
       {
@@ -432,7 +453,7 @@ async function sell(accountId: PublicKey, mint: PublicKey, amount: BigNumberish,
           createCloseAccountInstruction(tokenAccount.address, wallet.publicKey, wallet.publicKey),
         ],
       }).compileToV0Message();
-      
+
       const transaction = new VersionedTransaction(messageV0);
       transaction.sign([wallet, ...innerTransaction.signers]);
       const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), {
@@ -491,6 +512,19 @@ function loadSnipedList() {
 
 function shouldBuy(key: string): boolean {
   return USE_SNIPEDLIST ? snipeList.includes(key) : true;
+}
+
+function writeObjectToFile(data: any, filePath: string) {
+  // Convert the object to a JSON string
+  const jsonString = JSON.stringify(data, null, 2); // The second argument is for formatting the JSON nicely with 2 spaces
+
+  try {
+    // Write the JSON string to the file synchronously
+    fs.writeFileSync(filePath, jsonString, 'utf8');
+    console.log('Successfully wrote object to file');
+  } catch (err) {
+    console.error('Error writing to file', err);
+  }
 }
 
 const runListener = async () => {
@@ -570,7 +604,7 @@ const runListener = async () => {
           if (currValue) {
             logger.info(accountData.mint, `Current Price: ${currValue} SOL`);
             completed = await sell(updatedAccountInfo.accountId, accountData.mint, accountData.amount, currValue);
-          } 
+          }
         }
       },
       commitment,
@@ -594,5 +628,55 @@ const runListener = async () => {
     setInterval(loadSnipedList, SNIPE_LIST_REFRESH_INTERVAL);
   }
 };
+
+// async function getPoolInfo(connection: Connection, poolId: PublicKey): Promise<ApiPoolInfoV4> {
+//   const info = await connection.getAccountInfo(poolId);
+//   if (!info) {
+//     throw error('No Pool Info')
+//   }
+
+//   let amAccountData = { id: poolId, programId: info.owner, ...LIQUIDITY_STATE_LAYOUT_V4.decode(info.data) }
+//   const marketProgramId = amAccountData.marketProgramId
+//   const allMarketInfo = await connection.getAccountInfo(marketProgramId)
+//   if (!allMarketInfo) {
+//     throw error('No Pool Info')
+//   }
+//   const itemMarketInfo = MARKET_STATE_LAYOUT_V3.decode(allMarketInfo.data)
+
+//   const marketInfo = {
+//     marketProgramId: allMarketInfo.owner.toString(),
+//     marketAuthority: Market.getAssociatedAuthority({ programId: allMarketInfo.owner, marketId: marketProgramId }).publicKey.toString(),
+//     marketBaseVault: itemMarketInfo.baseVault.toString(),
+//     marketQuoteVault: itemMarketInfo.quoteVault.toString(),
+//     marketBids: itemMarketInfo.bids.toString(),
+//     marketAsks: itemMarketInfo.asks.toString(),
+//     marketEventQueue: itemMarketInfo.eventQueue.toString()
+//   }
+
+//   const format: ApiPoolInfoV4 = {
+//     id: amAccountData.id.toString(),
+//     baseMint: amAccountData.baseMint.toString(),
+//     quoteMint: amAccountData.quoteMint.toString(),
+//     lpMint: amAccountData.lpMint.toString(),
+//     baseDecimals: amAccountData.baseDecimal.toNumber(),
+//     quoteDecimals: amAccountData.quoteDecimal.toNumber(),
+//     lpDecimals: amAccountData.baseDecimal.toNumber(),
+//     version: 4,
+//     programId: amAccountData.programId.toString(),
+//     authority: Liquidity.getAssociatedAuthority({ programId: amAccountData.programId }).publicKey.toString(),
+//     openOrders: amAccountData.openOrders.toString(),
+//     targetOrders: amAccountData.targetOrders.toString(),
+//     baseVault: amAccountData.baseVault.toString(),
+//     quoteVault: amAccountData.quoteVault.toString(),
+//     withdrawQueue: amAccountData.withdrawQueue.toString(),
+//     lpVault: amAccountData.lpVault.toString(),
+//     marketVersion: 3,
+//     marketId: amAccountData.marketId.toString(),
+//     ...marketInfo,
+//     lookupTableAccount: PublicKey.default.toString()
+//   }
+
+//   return format
+// }
 
 runListener();

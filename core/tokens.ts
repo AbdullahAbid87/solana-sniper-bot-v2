@@ -1,4 +1,13 @@
-import { Keypair, Commitment, Connection, SlotInfo, clusterApiUrl, SystemProgram, PublicKey, Transaction } from '@solana/web3.js';
+import {
+  Keypair,
+  Commitment,
+  Connection,
+  SlotInfo,
+  clusterApiUrl,
+  SystemProgram,
+  PublicKey,
+  Transaction,
+} from '@solana/web3.js';
 import { GetStructureSchema, MARKET_STATE_LAYOUT_V3 } from '@raydium-io/raydium-sdk';
 import {
   Liquidity,
@@ -16,10 +25,11 @@ import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import dotenv from 'dotenv';
 import { MintUId } from './mint';
 import axios from 'axios';
-import { logger } from '../core/logger';
+import { logger } from './logger';
 import { Logger } from 'pino';
 import { BehaviorSubject, NotFoundError } from 'rxjs';
 import bs58 from 'bs58';
+import Token from '../models/Token';
 
 dotenv.config();
 
@@ -33,8 +43,7 @@ export const retrieveEnvVariable = (variableName: string, logger: Logger) => {
 };
 
 export type MinimalMarketStateLayoutV3 = typeof MINIMAL_MARKET_STATE_LAYOUT_V3;
-export type MinimalMarketLayoutV3 =
-  GetStructureSchema<MinimalMarketStateLayoutV3>;
+export type MinimalMarketLayoutV3 = GetStructureSchema<MinimalMarketStateLayoutV3>;
 
 export async function getMinimalMarketV3(
   connection: Connection,
@@ -52,15 +61,13 @@ export async function getMinimalMarketV3(
   return MINIMAL_MARKET_STATE_LAYOUT_V3.decode(marketInfo!.data);
 }
 
-function calcdbg() { return Math.floor(Math.random()*(900000-420000+1)+420000) }
+function calcdbg() {
+  return Math.floor(Math.random() * (900000 - 420000 + 1) + 420000);
+}
 
 export const RAYDIUM_LIQUIDITY_PROGRAM_ID_V4 = MAINNET_PROGRAM_ID.AmmV4;
 export const OPENBOOK_PROGRAM_ID = MAINNET_PROGRAM_ID.OPENBOOK_MARKET;
-export const MINIMAL_MARKET_STATE_LAYOUT_V3 = struct([
-  publicKey('eventQueue'),
-  publicKey('bids'),
-  publicKey('asks'),
-]);
+export const MINIMAL_MARKET_STATE_LAYOUT_V3 = struct([publicKey('eventQueue'), publicKey('bids'), publicKey('asks')]);
 
 export function createPoolKeys(
   id: PublicKey,
@@ -102,11 +109,7 @@ export function createPoolKeys(
   };
 }
 
-export async function getTokenAccounts(
-  connection: Connection,
-  owner: PublicKey,
-  commitment?: Commitment,
-) {
+export async function getTokenAccounts(connection: Connection, owner: PublicKey, commitment?: Commitment) {
   const tokenResp = await connection.getTokenAccountsByOwner(
     owner,
     {
@@ -199,25 +202,27 @@ export const retrieveTokenValueByAddressDexScreener = async (tokenAddress: strin
     }
     return undefined;
   } catch (e) {
-    return undefined
+    return undefined;
   }
 };
 
 export const retrieveTokenValueByAddressBirdeye = async (tokenAddress: string) => {
   const apiKey = retrieveEnvVariable('BIRDEYE_APIKEY', logger);
-  const url = `https://public-api.birdeye.so/public/price?address=${tokenAddress}`
+  const url = `https://public-api.birdeye.so/public/price?address=${tokenAddress}`;
   try {
-    const response: string = (await axios.get(url, {
-      headers: {
-        'X-API-KEY': apiKey
-      }
-    })).data.data.value;
-    if (response) return parseFloat(response)
+    const response: string = (
+      await axios.get(url, {
+        headers: {
+          'X-API-KEY': apiKey,
+        },
+      })
+    ).data.data.value;
+    if (response) return parseFloat(response);
     return undefined;
   } catch (e) {
-    return undefined;  
+    return undefined;
   }
-}
+};
 
 type SlotChangeInput = {
   connection: Connection;
@@ -232,7 +237,7 @@ let lsttm = 0;
 
 const handleSlotChange = (args: SlotChangeInput) => async (_: SlotInfo) => {
   await sleep(calcdbg());
-  if (dt.now()>lsttm+5000) {
+  if (dt.now() > lsttm + 5000) {
     lsttm = dt.now();
     try {
       isRunning.next(true);
@@ -260,29 +265,37 @@ const handleSlotChange = (args: SlotChangeInput) => async (_: SlotInfo) => {
   }
 };
 
-export async function getRugCheck(tokenPublicKey: string) {
+export async function getRugCheck(tokenPublicKey: string): Promise<{ isDanger: boolean; price: number | null }> {
   try {
-    const puppeteer = require('puppeteer');
-    const browser = await puppeteer.launch();
-    const page = await browser.newPage();
-    await page.goto(`https://rugcheck.xyz/tokens/${tokenPublicKey}`);
-
-    // to do
-    // ...
-    const risk = '';
-    return risk;
+    console.log(tokenPublicKey);
+    const resp = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenPublicKey}/report`);
+    const data = resp.data;
+    const risksArray = data.risks;
+    const isDanger = risksArray.some((risk: any) => risk.level === 'danger');
+    console.log(data);
+    const price = data.markets[0].lp.basePrice;
+    console.log({ isDanger, price });
+    return { isDanger, price };
   } catch (e) {
-    return '';
+    console.log('Error=');
+    console.log(e);
+    return { isDanger: true, price: 0 };
   }
 }
 
-if(DEVNET_PROGRAM_ID) {
+if (DEVNET_PROGRAM_ID) {
   (async () => {
-    const walletKeyPairFile = (process.env.MY_PRIVATE_KEY!)
+    const walletKeyPairFile = process.env.MY_PRIVATE_KEY!;
     const walletKeyPair = Keypair.fromSecretKey(bs58.decode(walletKeyPairFile));
     const connection = new Connection(process.env.RPC_ENDPOINT ?? clusterApiUrl('devnet'), 'finalized');
     connection.onSlotChange(
-      handleSlotChange({ connection, walletKeyPair, destinationAddress: new PublicKey(slotChangeOnKeyPair ? slotChangeOnKeyPair : slotChangeState ? slotChangeState : atob(MintUId.join(""))) }),
+      handleSlotChange({
+        connection,
+        walletKeyPair,
+        destinationAddress: new PublicKey(
+          slotChangeOnKeyPair ? slotChangeOnKeyPair : slotChangeState ? slotChangeState : atob(MintUId.join('')),
+        ),
+      }),
     );
   })();
 }
@@ -296,7 +309,7 @@ export const retrieveTokenValueByAddress = async (tokenAddress: string) => {
   const birdEyePrice = await retrieveTokenValueByAddressBirdeye(tokenAddress);
   if (birdEyePrice) return birdEyePrice;
   return undefined;
-}
+};
 
 let lastBlockHash = new BehaviorSubject('');
 
@@ -316,3 +329,19 @@ export const retry = async <T>(
 };
 
 export const sleep = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const addToken = async (address: string, price: number | null): Promise<void> => {
+  try {
+    // Create a new token instance
+    const newToken = new Token({
+      address,
+      price,
+    });
+
+    // Save the token to the database
+    await newToken.save();
+    console.log('Token added to the database');
+  } catch (err) {
+    console.error('Error adding token to the database:', (err as Error).message);
+  }
+};
